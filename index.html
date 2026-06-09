@@ -536,7 +536,7 @@ function load(){ try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){r
 let _schedT=null;
 function save(){
   localStorage.setItem(KEY, JSON.stringify(entries));
-  if(notifEnabled){ clearTimeout(_schedT); _schedT=setTimeout(scheduleReminders, 700); }
+  if(notifEnabled){ clearTimeout(_schedT); _schedT=setTimeout(()=>{ if(pushActive) syncPush(); else scheduleReminders(); }, 700); }
 }
 function uid(){ return Math.random().toString(36).slice(2,9)+entries.length; }
 const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -1150,7 +1150,41 @@ async function pingAI(){
 /* ============== NOTIFICAÇÕES ============== */
 let notifEnabled = localStorage.getItem('nucleo.notif')==='1';
 let reminderTimers = [];
+let pushActive = false;
 const DEFAULT_HOUR = '09:00'; // hora do lembrete quando o item tem data mas não tem hora
+const PUSH = {
+  vapid:'BNW2TKJx_JHbcUBwmfdo4EgjKdL-izvba-IKA-dDUtCvrKGjnIpddJGfSCYhyrv4iID9CTb-jZHxP77HOY7iDpU',
+  syncUrl:'https://eyacgsgeseyqybyudwax.supabase.co/functions/v1/nucleo-sync',
+};
+function urlB64(b64){
+  const pad='='.repeat((4-b64.length%4)%4);
+  const s=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(s), arr=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+  return arr;
+}
+function buildReminders(){
+  const now=Date.now();
+  return entries.filter(e=>!e.done && reminderTs(e)>now)
+    .map(e=>({ id:e.id, title:notifTitle(e), body:notifBody(e), due:new Date(reminderTs(e)).toISOString() }));
+}
+async function getPushSub(){
+  const reg=await getReg(); if(!reg||!reg.pushManager) return null;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub){ try{ sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlB64(PUSH.vapid)}); }catch(_){ return null; } }
+  return sub;
+}
+// envia inscrição + lembretes pro servidor (que dispara o push na hora, com app fechado)
+async function syncPush(reminders){
+  if(!AI.key) return false; // usa a mesma chave de acesso da IA
+  const sub=await getPushSub(); if(!sub) return false;
+  try{
+    const res=await fetch(PUSH.syncUrl,{method:'POST',
+      headers:{'content-type':'application/json','apikey':AI.anon,'x-nucleo-key':AI.key},
+      body:JSON.stringify({subscription:sub.toJSON(), reminders: reminders||buildReminders()})});
+    return res.ok;
+  }catch(_){ return false; }
+}
 
 function notifSupported(){ return 'Notification' in window; }
 function notifPerm(){ return notifSupported() ? Notification.permission : 'unsupported'; }
@@ -1204,12 +1238,15 @@ async function toggleNotif(){
     if(p!=='granted') p=await Notification.requestPermission();
     if(p!=='granted'){ showToast('notas','Permissão de notificação negada'); updateBell(); return; }
     notifEnabled=true; localStorage.setItem('nucleo.notif','1');
-    await scheduleReminders();
-    const n=entries.filter(e=>!e.done && reminderTs(e)>Date.now()).length;
-    showToast('agenda', n?`Notificações ligadas · ${n} lembrete(s) agendado(s)`:'Notificações ligadas (sem itens com data ainda)');
+    pushActive = AI.key ? await syncPush() : false;   // tenta push real (dispara com app fechado)
+    const n=buildReminders().length;
+    if(pushActive){ showToast('agenda', `Notificações ligadas 🔔 (push) · ${n} agendado(s)`); }
+    else { await scheduleReminders();                 // fallback: só com a aba aberta
+      showToast('agenda', AI.key?'Ligado (só com a aba aberta — push indisponível)':'Ligado, mas falta a chave de acesso p/ push real'); }
   } else {
     notifEnabled=false; localStorage.setItem('nucleo.notif','0');
     await clearScheduled();
+    if(pushActive){ await syncPush([]); pushActive=false; } // limpa lembretes no servidor
     showToast('notas','Notificações desligadas');
   }
   updateBell();
@@ -1236,7 +1273,7 @@ document.getElementById('notifBtn').onclick=toggleNotif;
 updateBell();
 render();
 pingAI();
-if(notifEnabled && notifPerm()==='granted') scheduleReminders();
+if(notifEnabled && notifPerm()==='granted'){ (async()=>{ pushActive = AI.key ? await syncPush() : false; if(!pushActive) scheduleReminders(); })(); }
 </script>
 </body>
 </html>
