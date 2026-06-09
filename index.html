@@ -205,6 +205,9 @@
   .ghost:hover{color:var(--text);border-color:var(--line-strong);background:var(--card-2)}
   .ghost svg{width:15px;height:15px}
   .ghost.danger:hover{color:var(--danger);border-color:rgba(255,91,91,.35)}
+  .ghost.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+  .ghost.on svg{animation:bell .9s ease}
+  @keyframes bell{0%,100%{transform:rotate(0)}20%{transform:rotate(-12deg)}40%{transform:rotate(10deg)}60%{transform:rotate(-6deg)}80%{transform:rotate(3deg)}}
 
   /* ---------- buckets ---------- */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
@@ -429,6 +432,10 @@
       <button data-f="pendentes">Pendentes</button>
       <button data-f="feitas">Feitas</button>
     </div>
+    <button class="ghost" id="notifBtn" title="Notificações de lembrete">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      <span id="notifLbl">Notificar</span>
+    </button>
     <button class="ghost" id="exportBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
       Exportar
@@ -526,7 +533,11 @@ let editingId = null;
 let undoTimer = null;
 
 function load(){ try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){return[]} }
-function save(){ localStorage.setItem(KEY, JSON.stringify(entries)); }
+let _schedT=null;
+function save(){
+  localStorage.setItem(KEY, JSON.stringify(entries));
+  if(notifEnabled){ clearTimeout(_schedT); _schedT=setTimeout(scheduleReminders, 700); }
+}
 function uid(){ return Math.random().toString(36).slice(2,9)+entries.length; }
 const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 
@@ -617,18 +628,67 @@ function categorize(text){
   return best;
 }
 
-/* ============== EXTRAÇÃO DE METADADOS ============== */
+/* ============== EXTRAÇÃO DE METADADOS (resolvedor local de data/hora) ============== */
+// Backstop offline e palpite imediato; a IA sobrescreve quando online.
+function isoOf(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function relDayLabel(dateStr){
+  const base=new Date(); base.setHours(0,0,0,0);
+  const day=new Date(dateStr+'T12:00'); day.setHours(0,0,0,0);
+  const diff=Math.round((day-base)/86400000);
+  if(diff===0) return 'hoje'; if(diff===1) return 'amanhã'; if(diff===-1) return 'ontem';
+  return new Date(dateStr+'T12:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit'}).replace('.','');
+}
 function extractMeta(text){
   const meta={};
   const m = text.match(/r\$\s?([\d.,]+)/i) || text.match(/\b([\d.,]+)\s?reais\b/i);
   if(m){ meta.money = 'R$ '+m[1].replace(/^\s+/,''); }
   const n=norm(text);
-  const days=['hoje','amanha','depois de amanha','segunda','terca','quarta','quinta','sexta','sabado','domingo'];
-  const dayLabel={hoje:'hoje',amanha:'amanhã','depois de amanha':'depois de amanhã',segunda:'segunda',terca:'terça',quarta:'quarta',quinta:'quinta',sexta:'sexta',sabado:'sábado',domingo:'domingo'};
-  let when='';
-  for(const d of days){ if(new RegExp('\\b'+d.replace(/ /g,'\\s')+'\\b').test(n)){ when=dayLabel[d]; break; } }
-  const tm = text.match(/\b(\d{1,2})\s?(?:h|:)\s?(\d{2})?\b/);
-  if(tm){ const hh=tm[1].padStart(2,'0'); const mm=tm[2]?':'+tm[2]:'h'; when=(when?when+' ':'')+hh+mm; }
+
+  // ---- HORA ----
+  let time=null;
+  const period = /\bd[ae]\s+tarde\b/.test(n) ? 'pm' : /\bd[ae]\s+noite\b/.test(n) ? 'night'
+               : /\bd[ae]\s+manha\b/.test(n) ? 'am' : null;
+  if(/\bmeio[- ]?dia\b/.test(n)) time='12:00';
+  else if(/\bmeia[- ]?noite\b/.test(n)) time='00:00';
+  else {
+    let tm = n.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/) || n.match(/\b(\d{1,2})\s*h\b/)
+          || (period && (n.match(/\bas\s+(\d{1,2})\b/) || n.match(/\b(\d{1,2})\s+d[ae]\s+(?:manha|tarde|noite)\b/)));
+    if(tm){
+      let hh=+tm[1], mm=tm[2]?+tm[2]:0;
+      if(/\be meia\b/.test(n) && !tm[2]) mm=30;
+      if((period==='pm'||period==='night') && hh<12) hh+=12;
+      if(period==='am' && hh===12) hh=0;
+      if(hh>=0&&hh<24&&mm>=0&&mm<60) time=String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+    }
+  }
+
+  // ---- DATA ----
+  let date=null;
+  const base=new Date(); base.setHours(0,0,0,0);
+  const add=k=>{ const x=new Date(base); x.setDate(x.getDate()+k); return x; };
+  const wd={domingo:0,segunda:1,terca:2,quarta:3,quinta:4,sexta:5,sabado:6};
+  let mm;
+  if(/\bdepois de amanha\b/.test(n)) date=isoOf(add(2));
+  else if(/\bamanha\b/.test(n)) date=isoOf(add(1));
+  else if(/\bhoje\b/.test(n)) date=isoOf(base);
+  else if((mm=n.match(/\b(domingo|segunda|terca|quarta|quinta|sexta|sabado)(?:\s*-?\s*feira)?\b/))){
+    let diff=(wd[mm[1]]-base.getDay()+7)%7; if(diff===0) diff=7; date=isoOf(add(diff));
+  }
+  else if((mm=n.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))){
+    let dd=+mm[1], mo=+mm[2]-1, yy=mm[3]?(+mm[3]<100?2000+ +mm[3]:+mm[3]):base.getFullYear();
+    const c=new Date(yy,mo,dd); if(!mm[3] && c<base) c.setFullYear(yy+1);
+    if(!isNaN(c)) date=isoOf(c);
+  }
+  else if((mm=n.match(/\bdia\s+(\d{1,2})\b/))){
+    const dd=+mm[1], c=new Date(base.getFullYear(),base.getMonth(),dd);
+    if(c<base) c.setMonth(c.getMonth()+1);
+    if(!isNaN(c)&&dd>=1&&dd<=31) date=isoOf(c);
+  }
+
+  if(date) meta.date=date;
+  if(time) meta.time=time;
+  let when = date ? relDayLabel(date) : '';
+  if(time) when=(when?when+' ':'')+time;
   if(when) meta.when=when;
   return meta;
 }
@@ -640,7 +700,7 @@ async function addEntry(text, opts={}){
   // 1) entrada otimista: aparece NA HORA com palpite local + spinner
   const lm=extractMeta(text);
   const e = {id:uid(), text, clean:text, title:'', cat:(opts.cat||categorize(text)),
-             when:lm.when||null, date:null, time:null, amount:lm.money||null,
+             when:lm.when||null, date:lm.date||null, time:lm.time||null, amount:lm.money||null,
              done:false, notes:'', ts:Date.now(), status:'thinking', ai:false};
   entries.unshift(e); save(); render();
   // 2) IA refina (a menos que o usuário tenha forçado a categoria)
@@ -1087,6 +1147,82 @@ async function pingAI(){
   }catch(e){ updateAIPill('off'); return 'neterr'; }
 }
 
+/* ============== NOTIFICAÇÕES ============== */
+let notifEnabled = localStorage.getItem('nucleo.notif')==='1';
+let reminderTimers = [];
+const DEFAULT_HOUR = '09:00'; // hora do lembrete quando o item tem data mas não tem hora
+
+function notifSupported(){ return 'Notification' in window; }
+function notifPerm(){ return notifSupported() ? Notification.permission : 'unsupported'; }
+function reminderTs(e){
+  if(!e.date) return 0;
+  const d=new Date(e.date+'T'+(e.time||DEFAULT_HOUR));
+  return isNaN(d)?0:d.getTime();
+}
+function notifTitle(e){ const c=CATS[e.cat]||CATS.notas; return '🔔 '+c.icon+' '+(e.title||e.clean||e.text).slice(0,60); }
+function notifBody(e){
+  const di=dateInfo(e);
+  return [(e.title&&e.clean&&norm(e.clean)!==norm(e.title))?e.clean:'', di?'🗓 '+di.label:'', e.amount?'💵 '+e.amount:'']
+    .filter(Boolean).join('  ·  ') || 'Lembrete do NÚCLEO';
+}
+// não trava se não houver service worker: corre contra um timeout
+async function getReg(){
+  if(!('serviceWorker' in navigator)) return null;
+  try{ return await Promise.race([navigator.serviceWorker.ready, new Promise(r=>setTimeout(()=>r(null),1500))]); }
+  catch(_){ return null; }
+}
+async function clearScheduled(){
+  reminderTimers.forEach(t=>clearTimeout(t)); reminderTimers=[];
+  const reg=await getReg();
+  if(reg){ try{ (await reg.getNotifications({includeTriggered:true})).forEach(nt=>{ if((nt.tag||'').startsWith('nucleo-')) nt.close(); }); }catch(_){} }
+}
+async function scheduleReminders(){
+  if(!notifEnabled || notifPerm()!=='granted') return;
+  await clearScheduled();
+  const now=Date.now();
+  const due=entries.filter(e=>!e.done && reminderTs(e)>now).sort((a,b)=>reminderTs(a)-reminderTs(b)).slice(0,60);
+  const reg=await getReg();
+  const canTrigger = reg && ('TimestampTrigger' in window) && ('showTrigger' in Notification.prototype);
+  for(const e of due){
+    const ts=reminderTs(e);
+    const opts={ tag:'nucleo-'+e.id, body:notifBody(e), data:{id:e.id} };
+    if(canTrigger){ try{ await reg.showNotification(notifTitle(e), {...opts, showTrigger:new TimestampTrigger(ts)}); }catch(_){} }
+    else { const delay=ts-now; if(delay>0 && delay<2147483647) reminderTimers.push(setTimeout(()=>fireNow(e.id), delay)); }
+  }
+}
+function fireNow(id){
+  if(notifPerm()!=='granted') return;
+  const e=entries.find(x=>x.id===id); if(!e || e.done) return;
+  const opts={ body:notifBody(e), tag:'nucleo-'+e.id };
+  getReg().then(reg=>{ if(reg) reg.showNotification(notifTitle(e),opts); else new Notification(notifTitle(e),opts); })
+          .catch(()=>{ try{ new Notification(notifTitle(e),opts); }catch(_){} });
+}
+async function toggleNotif(){
+  if(!notifSupported()){ showToast('notas','Este navegador não suporta notificações'); return; }
+  if(!notifEnabled){
+    let p=Notification.permission;
+    if(p!=='granted') p=await Notification.requestPermission();
+    if(p!=='granted'){ showToast('notas','Permissão de notificação negada'); updateBell(); return; }
+    notifEnabled=true; localStorage.setItem('nucleo.notif','1');
+    await scheduleReminders();
+    const n=entries.filter(e=>!e.done && reminderTs(e)>Date.now()).length;
+    showToast('agenda', n?`Notificações ligadas · ${n} lembrete(s) agendado(s)`:'Notificações ligadas (sem itens com data ainda)');
+  } else {
+    notifEnabled=false; localStorage.setItem('nucleo.notif','0');
+    await clearScheduled();
+    showToast('notas','Notificações desligadas');
+  }
+  updateBell();
+}
+function updateBell(){
+  const b=document.getElementById('notifBtn'), l=document.getElementById('notifLbl'); if(!b) return;
+  const on = notifEnabled && notifPerm()==='granted';
+  b.classList.toggle('on', on);
+  if(l) l.textContent = on ? 'Notificando' : 'Notificar';
+  b.title = !notifSupported() ? 'Navegador sem suporte a notificações'
+          : on ? 'Lembretes ligados — toque para desligar' : 'Toque para ligar lembretes na data/hora';
+}
+
 /* ============== INIT ============== */
 document.getElementById('datePill').textContent=new Date().toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'});
 document.getElementById('aiPill').onclick=openKeyDialog; // tocar no indicador = inserir/editar a chave da IA
@@ -1095,8 +1231,12 @@ document.getElementById('keySave').onclick=saveKey;
 document.getElementById('keyRemove').onclick=removeKey;
 document.getElementById('keyOverlay').onclick=e=>{ if(e.target.id==='keyOverlay') closeKeyDialog(); };
 document.getElementById('keyInput').addEventListener('keydown',e=>{ if(e.key==='Enter') saveKey(); });
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{}); // p/ lembretes em 2º plano (Chrome)
+document.getElementById('notifBtn').onclick=toggleNotif;
+updateBell();
 render();
 pingAI();
+if(notifEnabled && notifPerm()==='granted') scheduleReminders();
 </script>
 </body>
 </html>
