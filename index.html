@@ -652,7 +652,7 @@ function extractMeta(text){
   else if(/\bmeia[- ]?noite\b/.test(n)) time='00:00';
   else {
     let tm = n.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/) || n.match(/\b(\d{1,2})\s*h\b/)
-          || (period && (n.match(/\bas\s+(\d{1,2})\b/) || n.match(/\b(\d{1,2})\s+d[ae]\s+(?:manha|tarde|noite)\b/)));
+          || (period && n.match(/\bas\s+(\d{1,2})\b/)); // só hora explícita; evita confundir "dia 20" com 20h
     if(tm){
       let hh=+tm[1], mm=tm[2]?+tm[2]:0;
       if(/\be meia\b/.test(n) && !tm[2]) mm=30;
