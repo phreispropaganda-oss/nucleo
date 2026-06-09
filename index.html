@@ -476,6 +476,28 @@
   </div>
 </div>
 
+<!-- dialog da chave da IA -->
+<div class="overlay" id="keyOverlay">
+  <div class="modal" style="max-width:430px">
+    <div class="modal-head">
+      <h4>Chave de acesso à IA</h4>
+      <button class="x" id="keyClose" aria-label="Fechar">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:13px">
+        Cole a chave de acesso aqui. Ela fica salva <b>só neste aparelho</b> e liga a categorização por IA. Sem ela, o app usa palavras-chave.
+      </p>
+      <input id="keyInput" type="text" placeholder="cole a chave aqui" autocomplete="off" autocapitalize="off" spellcheck="false"
+        style="width:100%;background:var(--bg);border:1px solid var(--line-strong);border-radius:11px;padding:12px;color:var(--text);font-family:ui-monospace,monospace;font-size:13px;outline:none">
+      <div id="keyStatus" style="font-size:12.5px;margin-top:11px;min-height:18px;color:var(--muted);font-weight:500"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="link-danger" id="keyRemove">Remover</button>
+      <button class="btn" id="keySave">Salvar e testar</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"><span class="tdot"></span><span id="toastMsg"></span><button id="toastAction" style="display:none"></button></div>
 
 <script>
@@ -551,13 +573,30 @@ function updateAIPill(state){ // 'ok' | 'off' | 'nokey'
     state==='nokey'? 'IA: toque p/ inserir a chave' :
                      'IA offline \u00b7 palavras-chave';
 }
-function promptKey(){
-  const k=prompt('Cole sua chave de acesso \u00e0 IA do N\u00daCLEO:', AI.key||'');
-  if(k===null) return;
-  AI.key=k.trim();
+function openKeyDialog(){
+  const inp=document.getElementById('keyInput'), st=document.getElementById('keyStatus');
+  inp.value=AI.key||''; st.textContent='';
+  document.getElementById('keyOverlay').classList.add('on');
+  setTimeout(()=>{ inp.focus(); inp.select(); }, 60);
+}
+function closeKeyDialog(){ document.getElementById('keyOverlay').classList.remove('on'); }
+async function saveKey(){
+  const inp=document.getElementById('keyInput'), st=document.getElementById('keyStatus');
+  AI.key=inp.value.trim();
   localStorage.setItem('nucleo.aikey', AI.key);
-  showToast('agenda', AI.key?'Chave salva neste aparelho':'Chave removida');
-  pingAI();
+  if(!AI.key){ updateAIPill('nokey'); st.style.color='var(--muted)'; st.textContent='Chave vazia.'; return; }
+  st.style.color='var(--muted)'; st.textContent='Testando a chave...';
+  const s=await pingAI();
+  if(s==='ok'){ st.style.color='var(--c-folga)'; st.textContent='\u2713 IA ligada! Pode fechar.'; setTimeout(closeKeyDialog,1000); }
+  else if(s==='badkey'){ st.style.color='var(--danger)'; st.textContent='\u2717 Chave incorreta. Confere e cola de novo.'; }
+  else if(s==='neterr'){ st.style.color='var(--danger)'; st.textContent='\u2717 Sem conex\u00e3o com a fun\u00e7\u00e3o. Cheque sua internet.'; }
+  else { st.style.color='var(--danger)'; st.textContent='\u2717 A fun\u00e7\u00e3o respondeu com erro. Tente de novo em instantes.'; }
+}
+function removeKey(){
+  AI.key=''; localStorage.removeItem('nucleo.aikey');
+  document.getElementById('keyInput').value='';
+  const st=document.getElementById('keyStatus'); st.style.color='var(--muted)'; st.textContent='Chave removida.';
+  updateAIPill('nokey');
 }
 
 /* ============== CLASSIFICADOR (fallback local sem IA) ============== */
@@ -1026,28 +1065,36 @@ function hideToast(){ toast.classList.remove('on'); }
 
 /* ============== ATALHO DE TECLADO ============== */
 document.addEventListener('keydown',e=>{
-  if(e.code==='Space' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName) && !overlay.classList.contains('on')){
+  if(e.code==='Space' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName) && !overlay.classList.contains('on') && !document.getElementById('keyOverlay').classList.contains('on')){
     e.preventDefault(); toggleRec();
   }
-  if(e.key==='Escape' && overlay.classList.contains('on')) closeModal();
+  if(e.key==='Escape'){ if(overlay.classList.contains('on')) closeModal(); if(document.getElementById('keyOverlay').classList.contains('on')) closeKeyDialog(); }
 });
 
 /* ============== HEALTH-CHECK DA IA (custo zero) ============== */
 async function pingAI(){
   // manda texto vazio: a função responde 400 ANTES de chamar o Claude (não gasta IA),
   // só pra sabermos se está no ar e com a chave certa.
-  if(!AI.key){ updateAIPill('nokey'); return; }
+  if(!AI.key){ updateAIPill('nokey'); return 'nokey'; }
   try{
     const res=await fetch(AI.url,{method:'POST',
       headers:{'content-type':'application/json','apikey':AI.anon,'authorization':'Bearer '+AI.anon,'x-nucleo-key':AI.key},
       body:JSON.stringify({text:''})});
-    setAI(res.status===400 || res.ok); // 400 'empty' = viva e autenticada
-  }catch(e){ setAI(false); }
+    if(res.status===401){ updateAIPill('off'); return 'badkey'; } // chave errada
+    const ok = res.status===400 || res.ok;                       // 400 'empty' = viva e autenticada
+    updateAIPill(ok?'ok':'off');
+    return ok?'ok':'off';
+  }catch(e){ updateAIPill('off'); return 'neterr'; }
 }
 
 /* ============== INIT ============== */
 document.getElementById('datePill').textContent=new Date().toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'});
-document.getElementById('aiPill').onclick=promptKey; // tocar no indicador = inserir/editar a chave da IA
+document.getElementById('aiPill').onclick=openKeyDialog; // tocar no indicador = inserir/editar a chave da IA
+document.getElementById('keyClose').onclick=closeKeyDialog;
+document.getElementById('keySave').onclick=saveKey;
+document.getElementById('keyRemove').onclick=removeKey;
+document.getElementById('keyOverlay').onclick=e=>{ if(e.target.id==='keyOverlay') closeKeyDialog(); };
+document.getElementById('keyInput').addEventListener('keydown',e=>{ if(e.key==='Enter') saveKey(); });
 render();
 pingAI();
 </script>
